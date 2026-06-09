@@ -66,6 +66,7 @@ extension Generation {
         config: GenerationConfig,
         tokens: InputTokens,
         model: NextTokenModel,
+        stoppingCriteria: [any StoppingCriteria] = [],
         callback: PredictionTokensCallback? = nil
     ) async throws -> GenerationOutput {
         let tokens = tokens.map { Int32($0) }
@@ -78,12 +79,12 @@ extension Generation {
         let maxTotalLength = min(config.maxLength, inputLength + config.maxNewTokens)
 
         while outputTokens.shape[1] < maxTotalLength {
-            // Stop promptly when the surrounding Task is cancelled (e.g. iOS scene
-            // leaving the foreground). Without this the loop runs to maxNewTokens
-            // regardless of cancellation and keeps submitting Core ML GPU work — which
-            // can fault when the app backgrounds. See the cancellation/background-GPU
-            // fix in this fork.
-            guard !Task.isCancelled else { break }
+            // Respect Swift structured cancellation: an abandoned generation (timeout,
+            // teardown, `.cancel()`) throws `CancellationError` rather than running to
+            // `maxNewTokens`. (Caller-policy early-stop is the separate `stoppingCriteria`
+            // path below, which returns the partial sequence cleanly instead of throwing.)
+            try Task.checkCancellation()
+
             // Get raw logits from model
             let nextTokenScores = try await model(outputTokens, config)
 
@@ -106,9 +107,17 @@ extension Generation {
             }
 
             outputTokens = MLTensor(concatenating: [outputTokens, nextToken], alongAxis: -1)
+
+            // Materialize the running token IDs once if either the callback or a
+            // stopping criterion needs them.
+            let needsTokenIDs = callback != nil || !stoppingCriteria.isEmpty
+            let outputTokenIDs = needsTokenIDs ? await tensorToGenerationOutput(outputTokens) : []
             if let callback {
-                let outputTokenIDs = await tensorToGenerationOutput(outputTokens)
                 callback(outputTokenIDs)
+            }
+            if !stoppingCriteria.isEmpty,
+               stoppingCriteria.contains(where: { $0.shouldStop(tokens: outputTokenIDs, scores: processedScores) }) {
+                break
             }
         }
         return await tensorToGenerationOutput(outputTokens)
