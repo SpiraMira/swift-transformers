@@ -17,7 +17,10 @@ import CoreML
 public protocol StoppingCriteria: Sendable {
     /// Whether generation should stop now.
     /// - Parameters:
-    ///   - tokens: the full token sequence so far (prompt + completion).
+    ///   - tokens: the token sequence so far (prompt + completion). NOTE: materializing
+    ///     tokens every step is a GPU→CPU sync, so this is only populated when a streaming
+    ///     callback is already materializing them; otherwise it is empty. Content-free
+    ///     criteria (deadline, lifecycle, supersession) must not depend on it.
     ///   - scores: the processed logits for the most recent step, if available.
     /// - Returns: `true` to stop generation.
     func shouldStop(tokens: [Int], scores: MLTensor?) -> Bool

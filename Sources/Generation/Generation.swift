@@ -108,15 +108,19 @@ extension Generation {
 
             outputTokens = MLTensor(concatenating: [outputTokens, nextToken], alongAxis: -1)
 
-            // Materialize the running token IDs once if either the callback or a
-            // stopping criterion needs them.
-            let needsTokenIDs = callback != nil || !stoppingCriteria.isEmpty
-            let outputTokenIDs = needsTokenIDs ? await tensorToGenerationOutput(outputTokens) : []
+            // Materialize the running token IDs ONLY for the streaming callback. This is a
+            // per-token GPU→CPU sync (O(n) copy + pipeline stall); doing it unconditionally
+            // for stopping criteria regressed the non-streaming path badly (the common case).
+            // Criteria that need token content reuse the callback's array when present;
+            // content-free criteria (deadline, lifecycle, supersession) impose no sync here.
+            var materializedTokenIDs: [Int]? = nil
             if let callback {
-                callback(outputTokenIDs)
+                let ids = await tensorToGenerationOutput(outputTokens)
+                materializedTokenIDs = ids
+                callback(ids)
             }
             if !stoppingCriteria.isEmpty,
-               stoppingCriteria.contains(where: { $0.shouldStop(tokens: outputTokenIDs, scores: processedScores) }) {
+               stoppingCriteria.contains(where: { $0.shouldStop(tokens: materializedTokenIDs ?? [], scores: processedScores) }) {
                 break
             }
         }
