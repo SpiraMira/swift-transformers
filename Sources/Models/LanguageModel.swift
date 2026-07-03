@@ -466,12 +466,14 @@ extension LanguageModel {
     public func generate(
         config: GenerationConfig,
         tokens: InputTokens,
+        stoppingCriteria: [any StoppingCriteria] = [],
         callback: PredictionTokensCallback? = nil
     ) async throws -> GenerationOutput {
         return await generate(
             config: config,
             tokens: tokens,
             model: callAsFunction,
+            stoppingCriteria: stoppingCriteria,
             callback: callback
         )
     }
