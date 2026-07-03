@@ -66,6 +66,7 @@ extension Generation {
         config: GenerationConfig,
         tokens: InputTokens,
         model: NextTokenModel,
+        stoppingCriteria: [any StoppingCriteria] = [],
         callback: PredictionTokensCallback? = nil
     ) async -> GenerationOutput {
         let tokens = tokens.map { Int32($0) }
@@ -95,14 +96,30 @@ extension Generation {
                     fatalError("Generation mode \(config.generationMode) not implemented yet")
                 }
 
-            if let nextTokenId = await tensorToGenerationOutput(nextToken).first, nextTokenId == config.eosTokenId {
+            // The newly generated token, materialized once — this single-element GPU→CPU
+            // sync already drives the eos check, and is reused below for last-token
+            // stopping criteria so they cost no extra sync.
+            let newTokenIDs = await tensorToGenerationOutput(nextToken)
+            if let nextTokenId = newTokenIDs.first, nextTokenId == config.eosTokenId {
                 break
             }
 
             outputTokens = MLTensor(concatenating: [outputTokens, nextToken], alongAxis: -1)
+
+            // Materializing the full running sequence is an O(n) per-token GPU→CPU sync,
+            // so do it only for the streaming callback. Stopping criteria reuse that array
+            // when a callback is present; otherwise they see just the newest token — enough
+            // for last-token criteria like EosTokenCriteria, and content-free criteria
+            // (deadline, lifecycle) ignore it entirely.
+            var fullTokenIDs: [Int]? = nil
             if let callback {
-                let outputTokenIDs = await tensorToGenerationOutput(outputTokens)
-                callback(outputTokenIDs)
+                let ids = await tensorToGenerationOutput(outputTokens)
+                fullTokenIDs = ids
+                callback(ids)
+            }
+            if !stoppingCriteria.isEmpty,
+               stoppingCriteria.contains(where: { $0.shouldStop(tokens: fullTokenIDs ?? newTokenIDs, scores: processedScores) }) {
+                break
             }
         }
         return await tensorToGenerationOutput(outputTokens)
